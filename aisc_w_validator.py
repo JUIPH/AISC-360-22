@@ -216,45 +216,123 @@ class ValidadorAISC:
     # Del campitulo a compresión para mienbros W
     def _verificar_compresion_no_esbeltos(self) -> Dict:
         """
-        E3: Pandeo flexional de miembros sin elementos esbeltos
-        Ecuaciones E3-1, E3-2, E3-3, E3-4 del AISC 360
+        E3 y E4: Pandeo de miembros sin elementos esbeltos
+        Considera tanto pandeo flexional (E3) como torsional (E4)
+        Ecuaciones E3-1 a E3-4 y E4-1 a E4-2 del AISC 360
         """
-        # Relaciones de longitud efectiva
+        # =========================================================================
+        # E3: PANDEO FLEXIONAL
+        # =========================================================================
+
+        # Relaciones de longitud efectiva para pandeo flexional
         KL_r_x = self.cargas.Lx / self.perfil.rx
         KL_r_y = self.cargas.Ly / self.perfil.ry
-        # Verificar para validación de mayor precisión para que valide
-        # ambos sentidos
-        KL_r = max(KL_r_x, KL_r_y)  # Relación de esbeltez gobernante
-        
-        # Esfuerzo de pandeo elástico (Ecuación E3-4)
-        Fe = (math.pi**2 * self.perfil.E) / (KL_r**2)
-        
-        # Determinar Fcr basado en esbeltez (Ecuaciones E3-2 y E3-3)
-        lambda_c = self.perfil.Fy / Fe
-        
-        if KL_r <= 4.71 * math.sqrt(self.perfil.E / self.perfil.Fy) or lambda_c <= 2.25:  # o λc ≤ 2.25
+        KL_r_flex = max(KL_r_x, KL_r_y)  # Relación de esbeltez gobernante para flexión
+
+        # Esfuerzo de pandeo elástico flexional (Ecuación E3-4)
+        Fe_flex = (math.pi ** 2 * self.perfil.E) / (KL_r_flex ** 2)
+
+        # =========================================================================
+        # E4: PANDEO TORSIONAL (para perfiles W doblemente simétricos)
+        # =========================================================================
+
+        # Verificar si se debe considerar pandeo torsional
+        # E4 aplica cuando la longitud no arriostrada torsional es significativa
+        considerar_torsional = True  # Para perfiles W siempre considerar
+
+        # Inicializar variables para evitar referencias no definidas
+        Lcz = None
+        termino_alabeo = None
+        termino_torsional = None
+        Fe_tors = None
+        modo_pandeo_elastico = None
+
+        if considerar_torsional:
+            # Módulo de cortante del acero (Ecuación E4-7)
+            G = self.perfil.E / (2*(1+0.3))  # kgf/cm²
+
+            # Longitud efectiva para pandeo torsional
+            # Por defecto, usar la longitud no arriostrada del miembro
+            Lcz = self.cargas.L  # Longitud efectiva para pandeo torsional
+
+            # Si el usuario proporcionó una longitud específica, usarla
+            # (se puede agregar un parámetro Lcz a CondicionesCarga si es necesario)
+
+            # Esfuerzo de pandeo elástico torsional (Ecuación E4-2)
+            # Para miembros doblemente simétricos que giran sobre el centro de corte:
+            # Fe = (π²ECw/Lcz² + GJ) * 1/(Ix + Iy)
+
+            termino_alabeo = (math.pi ** 2 * self.perfil.E * self.perfil.Cw) / (Lcz ** 2)
+            termino_torsional = G * self.perfil.J
+
+            Fe_tors = (termino_alabeo + termino_torsional) * (1/ (self.perfil.Ix + self.perfil.Iy)) # E4-2
+
+            # El esfuerzo de pandeo elástico gobernante es el menor
+            Fe = min(Fe_flex, Fe_tors)
+
+            # Identificar modo de pandeo gobernante
+            if Fe == Fe_flex:
+                modo_pandeo_elastico = "flexional"
+            else:
+                modo_pandeo_elastico = "torsional"
+        else:
+            Fe = Fe_flex
+            Fe_tors = None
+            modo_pandeo_elastico = "flexional"
+
+        # =========================================================================
+        # DETERMINAR Fcr BASADO EN ESBELTEZ (Ecuaciones E3-2 y E3-3)
+        # =========================================================================
+
+        # Parámetro de esbeltez
+        lambda_c = math.sqrt(self.perfil.Fy / Fe)
+
+        # Límite entre pandeo inelástico y elástico
+        limite_esbeltez = 4.71 * math.sqrt(self.perfil.E / self.perfil.Fy)
+
+        if KL_r_flex <= limite_esbeltez or lambda_c <= 2.25:
             # Ecuación E3-2: Pandeo inelástico
-            Fcr = (0.658**(lambda_c)) * self.perfil.Fy
+            Fcr = (0.658 ** (lambda_c ** 2)) * self.perfil.Fy
             modo_pandeo = "inelastico"
+            ecuacion_fcr = "E3-2"
         else:
             # Ecuación E3-3: Pandeo elástico
             Fcr = 0.877 * Fe
             modo_pandeo = "elastico"
-        
-        # Resistencia nominal a compresión
-        Pn = Fcr * self.perfil.A  # Ecuación E3-1
-        
+            ecuacion_fcr = "E3-3"
+
+        # =========================================================================
+        # RESISTENCIA NOMINAL A COMPRESIÓN
+        # =========================================================================
+
+        # Resistencia nominal (Ecuaciones E3-1 y E4-1)
+        Pn = Fcr * self.perfil.A
+
         # Factor de resistencia LRFD
         phi_c = 0.9
         Pc = phi_c * Pn
-        
+
         # Relación demanda/capacidad
         RDC = abs(self.cargas.Pu) / Pc
-        
+
+        # =========================================================================
+        # RESULTADOS
+        # =========================================================================
+
         resultados = {
+            # Pandeo flexional (E3)
             'KL_r_x': KL_r_x,
             'KL_r_y': KL_r_y,
-            'KL_r_gobernante': KL_r,
+            'KL_r_gobernante': KL_r_flex,
+            'Fe_flexional': Fe_flex,
+
+            # Pandeo torsional (E4)
+            'Lcz': Lcz if considerar_torsional else None,
+            'Fe_torsional': Fe_tors,
+            'termino_alabeo': termino_alabeo if considerar_torsional else None,
+            'termino_torsional': termino_torsional if considerar_torsional else None,
+
+            # Valores gobernantes
             'Fe': Fe,
             'lambda_c': lambda_c,
             'Fcr': Fcr,
@@ -263,10 +341,15 @@ class ValidadorAISC:
             'Pu_aplicada': abs(self.cargas.Pu),
             'RDC': RDC,
             'estado': 'PASA' if RDC <= 1.0 else 'FALLA',
+
+            # Modos de pandeo
             'modo_pandeo': modo_pandeo,
-            'ecuaciones_ref': ['E3-1', 'E3-2' if modo_pandeo == 'inelastico' else 'E3-3', 'E3-4']
+            'modo_pandeo_elastico': modo_pandeo_elastico,
+
+            # Referencias
+            'ecuaciones_ref': ['E3-1', 'E4-1', ecuacion_fcr, 'E3-4', 'E4-2']
         }
-        
+
         return resultados
 
     # Implementar la parte de E4
